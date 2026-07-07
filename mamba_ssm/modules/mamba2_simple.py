@@ -7,18 +7,91 @@ import torch.nn.functional as F
 
 from einops import rearrange, repeat
 
-try:
-    from causal_conv1d import causal_conv1d_fn
-except ImportError:
-    causal_conv1d_fn = None
 
-try:
-    from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated, LayerNorm
-except ImportError:
-    RMSNormGated, LayerNorm = None, None
+def segsum(x):
+    """More stable segment sum calculation."""
+    T = x.size(-1)
+    x = repeat(x, "... d -> ... d e", e=T)
+    mask = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool), diagonal=-1)
+    x = x.masked_fill(~mask, 0)
+    x_segsum = torch.cumsum(x, dim=-2)
+    mask = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool), diagonal=0)
+    x_segsum = x_segsum.masked_fill(~mask, -torch.inf)
+    return x_segsum
 
-from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
-from mamba_ssm.ops.triton.ssd_combined import mamba_split_conv1d_scan_combined
+def ssd_minimal_discrete(X, A, B, C, block_len, initial_states=None):
+    """
+    Arguments:
+        X: (batch, length, n_heads, d_head)
+        A: (batch, length, n_heads)
+        B: (batch, length, n_heads, d_state)
+        C: (batch, length, n_heads, d_state)
+    Return:
+        Y: (batch, length, n_heads, d_head)
+    """
+    assert X.dtype == A.dtype == B.dtype == C.dtype
+    
+    # Pad sequence length to be a multiple of block_len
+    seqlen = X.shape[1]
+    pad_len = (block_len - seqlen % block_len) % block_len
+    if pad_len > 0:
+        X = F.pad(X, (0, 0, 0, 0, 0, pad_len))
+        A = F.pad(A, (0, 0, 0, pad_len))
+        B = F.pad(B, (0, 0, 0, 0, 0, pad_len))
+        C = F.pad(C, (0, 0, 0, 0, 0, pad_len))
+
+    # Rearrange into blocks/chunks
+    X, A, B, C = [rearrange(x, "b (c l) ... -> b c l ...", l=block_len) for x in (X, A, B, C)]
+
+    A = rearrange(A, "b c l h -> b h c l")
+    A_cumsum = torch.cumsum(A, dim=-1)
+
+    # 1. Compute the output for each intra-chunk (diagonal blocks)
+    L = torch.exp(segsum(A))
+    Y_diag  = torch.einsum("bclhn,bcshn,bhcls,bcshp->bclhp", C, B, L, X)
+
+    # 2. Compute the state for each intra-chunk
+    # (right term of low-rank factorization of off-diagonal blocks; B terms)
+    decay_states = torch.exp((A_cumsum[:, :, :, -1:] - A_cumsum))
+    states = torch.einsum("bclhn,bhcl,bclhp->bchpn", B, decay_states, X)
+
+    # 3. Compute the inter-chunk SSM recurrence; produces correct SSM states at chunk boundaries
+    # (middle term of factorization of off-diag blocks; A terms)
+    if initial_states is None:
+        initial_states = torch.zeros_like(states[:, :1])
+    states = torch.cat([initial_states, states], dim=1)
+    decay_chunk = torch.exp(segsum(F.pad(A_cumsum[:, :, :, -1], (1, 0))))
+    new_states = torch.einsum("bhzc,bchpn->bzhpn", decay_chunk, states)
+    states, final_state = new_states[:, :-1], new_states[:, -1]
+
+    # 4. Compute state -> output conversion per chunk
+    # (left term of low-rank factorization of off-diagonal blocks; C terms)
+    state_decay_out = torch.exp(A_cumsum)
+    Y_off = torch.einsum('bclhn,bchpn,bhcl->bclhp', C, states, state_decay_out)
+
+    # Add output of intra-chunk and inter-chunk terms (diagonal and off-diagonal blocks)
+    Y = rearrange(Y_diag+Y_off, "b c l h p -> b (c l) h p")
+    
+    if pad_len > 0:
+        Y = Y[:, :seqlen]
+        
+    return Y, final_state
+
+
+class RMSNormGatedFallback(nn.Module):
+    def __init__(self, d_model, eps=1e-5, norm_before_gate=False, **kwargs):
+        super().__init__()
+        self.eps = eps
+        self.norm_before_gate = norm_before_gate
+        self.weight = nn.Parameter(torch.ones(d_model, **kwargs))
+
+    def forward(self, x, z):
+        if self.norm_before_gate:
+            x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+            return x * F.silu(z)
+        else:
+            x = x * F.silu(z)
+            return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
 
 
 class Mamba2Simple(nn.Module):
@@ -42,7 +115,7 @@ class Mamba2Simple(nn.Module):
         conv_bias=True,
         # Fused kernel and sharding options
         chunk_size=256,
-        use_mem_eff_path=True,
+        use_mem_eff_path=False, # TPU fallback path
         layer_idx=None,  # Absorb kwarg for general module
         device=None,
         dtype=None,
@@ -63,7 +136,7 @@ class Mamba2Simple(nn.Module):
         self.learnable_init_states = learnable_init_states
         self.activation = activation
         self.chunk_size = chunk_size
-        self.use_mem_eff_path = use_mem_eff_path
+        self.use_mem_eff_path = False # Enforce False for TPU
         self.layer_idx = layer_idx
 
         # Order: [z, x, B, C, dt]
@@ -82,7 +155,6 @@ class Mamba2Simple(nn.Module):
         )
         if self.conv_init is not None:
             nn.init.uniform_(self.conv1d.weight, -self.conv_init, self.conv_init)
-        # self.conv1d.weight._no_weight_decay = True
 
         if self.learnable_init_states:
             self.init_states = nn.Parameter(torch.zeros(self.nheads, self.headdim, self.d_state, **factory_kwargs))
@@ -99,8 +171,6 @@ class Mamba2Simple(nn.Module):
         # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
         inv_dt = dt + torch.log(-torch.expm1(-dt))
         self.dt_bias = nn.Parameter(inv_dt)
-        # Just to be explicit. Without this we already don't put wd on dt_bias because of the check
-        # name.endswith("bias") in param_grouping.py
         self.dt_bias._no_weight_decay = True
 
         # A parameter
@@ -108,16 +178,13 @@ class Mamba2Simple(nn.Module):
         A = torch.empty(self.nheads, dtype=torch.float32, device=device).uniform_(*A_init_range)
         A_log = torch.log(A).to(dtype=dtype)
         self.A_log = nn.Parameter(A_log)
-        # self.register_buffer("A_log", torch.zeros(self.nheads, dtype=torch.float32, device=device), persistent=True)
         self.A_log._no_weight_decay = True
 
         # D "skip" parameter
         self.D = nn.Parameter(torch.ones(self.nheads, device=device))
         self.D._no_weight_decay = True
 
-        # Extra normalization layer right before output projection
-        assert RMSNormGated is not None
-        self.norm = RMSNormGated(self.d_inner, eps=1e-5, norm_before_gate=False, **factory_kwargs)
+        self.norm = RMSNormGatedFallback(self.d_inner, eps=1e-5, norm_before_gate=False, **factory_kwargs)
 
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=bias, **factory_kwargs)
 
@@ -131,70 +198,48 @@ class Mamba2Simple(nn.Module):
         zxbcdt = self.in_proj(u)  # (B, L, d_in_proj)
         A = -torch.exp(self.A_log)  # (nheads) or (d_inner, d_state)
         initial_states=repeat(self.init_states, "... -> b ...", b=batch) if self.learnable_init_states else None
-        dt_limit_kwargs = {} if self.dt_limit == (0.0, float("inf")) else dict(dt_limit=self.dt_limit)
 
-        if self.use_mem_eff_path:
-            # Fully fused path
-            out = mamba_split_conv1d_scan_combined(
-                zxbcdt,
-                rearrange(self.conv1d.weight, "d 1 w -> d w"),
-                self.conv1d.bias,
-                self.dt_bias,
-                A,
-                D=self.D,
-                chunk_size=self.chunk_size,
-                seq_idx=seq_idx,
-                activation=self.activation,
-                rmsnorm_weight=self.norm.weight,
-                rmsnorm_eps=self.norm.eps,
-                outproj_weight=self.out_proj.weight,
-                outproj_bias=self.out_proj.bias,
-                headdim=self.headdim,
-                ngroups=self.ngroups,
-                norm_before_gate=False,
-                initial_states=initial_states,
-                **dt_limit_kwargs,
-            )
-        else:
-            z, xBC, dt = torch.split(
-                zxbcdt, [self.d_inner, self.d_inner + 2 * self.ngroups * self.d_state, self.nheads], dim=-1
-            )
-            dt = F.softplus(dt + self.dt_bias)  # (B, L, nheads)
-            assert self.activation in ["silu", "swish"]
+        z, xBC, dt = torch.split(
+            zxbcdt, [self.d_inner, self.d_inner + 2 * self.ngroups * self.d_state, self.nheads], dim=-1
+        )
+        dt = F.softplus(dt + self.dt_bias)  # (B, L, nheads)
+        
+        # apply dt limit
+        if self.dt_limit[0] > 0.0 or self.dt_limit[1] < float("inf"):
+            dt = torch.clamp(dt, min=self.dt_limit[0], max=self.dt_limit[1])
+            
+        assert self.activation in ["silu", "swish"]
 
-            # 1D Convolution
-            if causal_conv1d_fn is None or self.activation not in ["silu", "swish"]:
-                xBC = self.act(
-                    self.conv1d(xBC.transpose(1, 2)).transpose(1, 2)
-                )  # (B, L, self.d_inner + 2 * ngroups * d_state)
-                xBC = xBC[:, :seqlen, :]
-            else:
-                xBC = causal_conv1d_fn(
-                    x=xBC.transpose(1, 2),
-                    weight=rearrange(self.conv1d.weight, "d 1 w -> d w"),
-                    bias=self.conv1d.bias,
-                    activation=self.activation,
-                ).transpose(1, 2)
+        # 1D Convolution (Standard PyTorch Fallback)
+        xBC = self.act(
+            self.conv1d(xBC.transpose(1, 2)).transpose(1, 2)
+        )  # (B, L, self.d_inner + 2 * ngroups * d_state)
+        xBC = xBC[:, :seqlen, :]
 
-            # Split into 3 main branches: X, B, C
-            # These correspond to V, K, Q respectively in the SSM/attention duality
-            x, B, C = torch.split(xBC, [self.d_inner, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
-            y = mamba_chunk_scan_combined(
-                rearrange(x, "b l (h p) -> b l h p", p=self.headdim),
-                dt,
-                A,
-                rearrange(B, "b l (g n) -> b l g n", g=self.ngroups),
-                rearrange(C, "b l (g n) -> b l g n", g=self.ngroups),
-                chunk_size=self.chunk_size,
-                D=self.D,
-                z=None,
-                seq_idx=seq_idx,
-                initial_states=initial_states,
-                **dt_limit_kwargs,
-            )
-            y = rearrange(y, "b l h p -> b l (h p)")
+        # Split into 3 main branches: X, B, C
+        x, B, C = torch.split(xBC, [self.d_inner, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
+        
+        x = rearrange(x, "b l (h p) -> b l h p", p=self.headdim)
+        B = rearrange(B, "b l (g n) -> b l g n", g=self.ngroups)
+        C = rearrange(C, "b l (g n) -> b l g n", g=self.ngroups)
+        
+        if self.ngroups != self.nheads:
+            B = repeat(B, "b l g n -> b l (g h) n", h=self.nheads // self.ngroups)
+            C = repeat(C, "b l g n -> b l (g h) n", h=self.nheads // self.ngroups)
 
-            # Multiply "gate" branch and apply extra normalization layer
-            y = self.norm(y, z)
-            out = self.out_proj(y)
+        # Apply ssd_minimal_discrete
+        dt_unsqueeze = dt.unsqueeze(-1)
+        X = x * dt_unsqueeze
+        A_dt = rearrange(A, "h -> 1 1 h") * dt
+        
+        y, _ = ssd_minimal_discrete(X, A_dt, B, C, self.chunk_size, initial_states)
+        
+        # Add D
+        y = y + x * rearrange(self.D, "h -> 1 1 h 1")
+
+        y = rearrange(y, "b l h p -> b l (h p)")
+
+        # Multiply "gate" branch and apply extra normalization layer
+        y = self.norm(y, z)
+        out = self.out_proj(y)
         return out

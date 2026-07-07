@@ -1,0 +1,41 @@
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: mamba2
+spec:
+  replicatedJobs:
+  - name: workers
+    template:
+      spec:
+        # For Ironwood 2x2x4 (16 chips total), we need 4 VMs with 4 chips each
+        parallelism: 4
+        completions: 4
+        backoffLimit: 0
+        template:
+          spec:
+            nodeSelector:
+              cloud.google.com/gke-tpu-topology: 2x2x4
+              cloud.google.com/gke-tpu-accelerator: tpu-v7-ironwood
+            containers:
+            - name: mamba2
+              # Replace YOUR_PROJECT with your Google Cloud Project ID
+              image: us-central1-docker.pkg.dev/YOUR_PROJECT/mamba-repo/mamba2-tpu:latest
+              command:
+              - bash
+              - -c
+              - |
+                # JobSet automatically creates a headless service named <jobset-name>
+                # The first pod is <jobset-name>-<replicated-job-name>-<job-index>-0
+                export MASTER_ADDR=mamba2-workers-0-0.mamba2
+                export MASTER_PORT=8080
+                
+                # Expose the current node's rank based on JobSet env variables
+                # PyTorch DDP uses rank and world size
+                export RANK=${JOB_COMPLETION_INDEX}
+                export WORLD_SIZE=4
+                
+                python3 mamba_tpu/train.py
+              resources:
+                limits:
+                  google.com/tpu: "4" # 4 TPU chips per VM
+            restartPolicy: Never

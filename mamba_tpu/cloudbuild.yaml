@@ -1,0 +1,19 @@
+steps:
+  # Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: 
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/mamba-repo/mamba2-tpu:latest'
+      - '-f'
+      - 'mamba_tpu/Dockerfile'
+      - '.'
+
+  # Push the Docker image to Google Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: 
+      - 'push'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/mamba-repo/mamba2-tpu:latest'
+
+images:
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/mamba-repo/mamba2-tpu:latest'
