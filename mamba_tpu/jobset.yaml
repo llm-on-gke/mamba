@@ -19,7 +19,7 @@ spec:
             containers:
             - name: mamba2
               # Replace YOUR_PROJECT with your Google Cloud Project ID
-              image: us-central1-docker.pkg.dev/YOUR_PROJECT/mamba-repo/mamba2-tpu:latest
+              image: us-east11-docker.pkg.dev/YOUR_PROJECT/gke-llm/mamba2-tpu:latest
               command:
               - bash
               - -c
