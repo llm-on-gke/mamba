@@ -15,11 +15,11 @@ spec:
           spec:
             nodeSelector:
               cloud.google.com/gke-tpu-topology: 2x2x4
-              cloud.google.com/gke-tpu-accelerator: tpu-v7-ironwood
+              cloud.google.com/gke-tpu-accelerator: tpu7x
             containers:
             - name: mamba2
               # Replace YOUR_PROJECT with your Google Cloud Project ID
-              image: us-east11-docker.pkg.dev/YOUR_PROJECT/gke-llm/mamba2-tpu:latest
+              image: us-east11-docker.pkg.dev/cloud-tpu-multipod-dev/gke-llm/mamba2-tpu:latest
               command:
               - bash
               - -c

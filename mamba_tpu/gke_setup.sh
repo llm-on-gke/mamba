@@ -3,18 +3,18 @@
 
 set -e
 
-PROJECT_ID=$(gcloud config get-value project)
-REGION="us-east1" # Typical region for v5e TPUs
-ZONE="us-east1-c"
-CLUSTER_NAME="mamba-tpu-cluster"
-NODEPOOL_NAME="v5litepod-16-pool"
+PROJECT_ID="cloud-tpu-multipod-dev"
+REGION="us-central1"
+ZONE="us-central1"
+CLUSTER_NAME="rick-tpu-ctk"
+NODEPOOL_NAME="ironwood-2x2x4-pool"
 
-echo "Creating GKE cluster ${CLUSTER_NAME} in ${ZONE}..."
-gcloud container clusters create ${CLUSTER_NAME} \
-  --location=${ZONE} \
-  --release-channel="regular" \
-  --workload-pool="${PROJECT_ID}.svc.id.goog" \
-  --enable-ip-alias
+# echo "Creating GKE cluster ${CLUSTER_NAME} in ${ZONE}..."
+# gcloud container clusters create ${CLUSTER_NAME} \
+#   --location=${ZONE} \
+#   --release-channel="regular" \
+#   --workload-pool="${PROJECT_ID}.svc.id.goog" \
+#   --enable-ip-alias
 
 POLICY_NAME="${NODEPOOL_NAME}-policy"
 echo "Creating compute resource policy ${POLICY_NAME} in ${REGION}..."
@@ -29,7 +29,8 @@ echo "Creating TPU v7 ironwood nodepool ${NODEPOOL_NAME}..."
 gcloud container node-pools create ${NODEPOOL_NAME} \
   --cluster=${CLUSTER_NAME} \
   --location=${ZONE} \
-  --machine-type=ct7-hightpu-4t \
+  --node-locations=us-central1-c \
+  --machine-type=tpu7x-standard-4t \
   --num-nodes=4 \
   --tpu-topology=2x2x4 \
   --spot \
