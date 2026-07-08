@@ -6,7 +6,7 @@ from torch import optim
 
 # Ensure we can import from mamba_ssm
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from mamba_ssm.modules.mamba2_simple import Mamba2Simple
+from mamba_ssm.modules.mamba3 import Mamba3
 
 def worker_fn():
     # Attempt to initialize torch_tpu
@@ -35,10 +35,9 @@ def worker_fn():
     print(f"Rank {rank}/{world_size} initializing model on {device}...")
     
     # 1. Create Model
-    model = Mamba2Simple(
+    model = Mamba3(
         d_model=d_model,
         d_state=16,
-        d_conv=4,
         expand=2,
         headdim=64,
         ngroups=1,

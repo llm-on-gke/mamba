@@ -41,7 +41,7 @@ COPY . /workspace/repo
 # Build the torch_tpu wheel
 RUN cd /workspace/repo/torch_tpu && \
     rm -rf bazel-* && \
-    bazel build -c opt //ci/wheel:torch_tpu_wheel --config=no_rbe && \
+    bazel build -c opt //ci/wheel:torch_tpu_wheel --config=no_rbe --jobs=8 --local_ram_resources=16384 && \
     mkdir -p dist && mv bazel-bin/ci/wheel/* dist/ && \
     pip install dist/*.whl --no-deps
 

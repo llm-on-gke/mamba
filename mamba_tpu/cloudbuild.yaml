@@ -4,7 +4,7 @@ steps:
     args: 
       - 'build'
       - '-t'
-      - 'us-east11-docker.pkg.dev/$PROJECT_ID/gke-llm/mamba2-tpu:latest'
+      - 'us-east1-docker.pkg.dev/$PROJECT_ID/gke-llm/mamba2-tpu:latest'
       - '-f'
       - 'mamba_tpu/Dockerfile'
       - '.'
@@ -13,7 +13,12 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: 
       - 'push'
-      - 'us-east11-docker.pkg.dev/$PROJECT_ID/gke-llm/mamba2-tpu:latest'
+      - 'us-east1-docker.pkg.dev/$PROJECT_ID/gke-llm/mamba2-tpu:latest'
 
 images:
-  - 'us-east11-docker.pkg.dev/$PROJECT_ID/gke-llm/mamba2-tpu:latest'
+  - 'us-east1-docker.pkg.dev/$PROJECT_ID/gke-llm/mamba2-tpu:latest'
+
+timeout: "14400s" # 4 hours
+options:
+  machineType: 'E2_HIGHCPU_32'
+  diskSizeGb: 200

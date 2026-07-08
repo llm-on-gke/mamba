@@ -10,6 +10,11 @@ import torch.nn.functional as F
 from mamba_ssm.ops.triton.layernorm_gated import RMSNorm as RMSNormGated
 
 try:
+    import torch_tpu
+except ImportError:
+    pass
+
+try:
     from mamba_ssm.ops.tilelang.mamba3.mamba3_mimo import mamba3_mimo as mamba3_mimo_combined
 except ImportError:
     mamba3_mimo_combined = None
