@@ -1,41 +1,111 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: mamba2
+  name: mamba3-fsdp-training
+  namespace: default
 spec:
+  failurePolicy:
+    maxRestarts: 0
   replicatedJobs:
-  - name: workers
+  - name: slice
+    replicas: 1
     template:
       spec:
-        # For Ironwood 2x2x4 (16 chips total), we need 4 VMs with 4 chips each
-        parallelism: 4
-        completions: 4
+        parallelism: 2  # 4 nodes in the slice
+        completions: 2
         backoffLimit: 0
         template:
+          metadata:
+            annotations:
+              #iam.gke.io/gcp-service-account: "${GCP_SERVICE_ACCOUNT}"
+              gke-gcsfuse/volumes: "true"
           spec:
+            restartPolicy: Never
+            hostNetwork: true
+            dnsPolicy: ClusterFirstWithHostNet
             nodeSelector:
-              cloud.google.com/gke-tpu-topology: 2x2x4
               cloud.google.com/gke-tpu-accelerator: tpu7x
+              cloud.google.com/gke-tpu-topology: 2x2x2
+            tolerations:
+            - key: "google.com/tpu"
+              operator: "Exists"
+              effect: "NoSchedule"
+            serviceAccountName: gcs-sa
+            volumes:
+            - name: gcs-fuse-writing
+              csi:
+                driver: gcsfuse.csi.storage.gke.io
+                volumeAttributes:
+                  bucketName: rick-tpu7x
+                  mountOptions: "only-dir=torch-tpu,implicit-dirs"
+                  fileCacheCapacity: "-1Mi"
+                  fileCacheForRangeRead: "true"
+                  metadataCacheTTLSeconds: "-1"
+                  metadataNegativeCacheTTLSeconds: "0"
+                  metadataStatCacheCapacity: "-1Mi"
+                  metadataTypeCacheCapacity: "-1Mi"
             containers:
-            - name: mamba2
-              # Replace YOUR_PROJECT with your Google Cloud Project ID
+            - name: torch-tpu-container
               image: us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/gke-llm/mamba2-tpu:latest
+              securityContext:
+                privileged: true
+              ports:
+              - containerPort: 8471
+              - containerPort: 29500
+              resources:
+                limits:
+                  google.com/tpu: 4  # 4 chips per node
+              env:
+              - name: PYTHONPATH
+                value: "/workspace/mamba_tpu"
+              - name: MASTER_ADDR
+                value: "mamba3-fsdp-training-slice-0-0.mamba3-fsdp-training"
+              - name: MASTER_PORT
+                value: "29500"
+              - name: ALLOW_MULTIPLE_LIBTPU_LOAD
+                value: "1"
+              volumeMounts:
+              - name: gcs-fuse-writing
+                mountPath: /gcs-fuse
               command:
               - bash
               - -c
               - |
-                # JobSet automatically creates a headless service named <jobset-name>
-                # The first pod is <jobset-name>-<replicated-job-name>-<job-index>-0
-                export MASTER_ADDR=mamba2-workers-0-0.mamba2
-                export MASTER_PORT=8080
+                # The JobSet controller names the pods matching: <jobset-name>-<replicated-job-name>-<replicated-job-index>-<pod-index>
+                # For our setup, the hostnames will be llama2-fsdp-training-slice-0-0 and llama2-fsdp-training-slice-0-1.
+                # However, with hostNetwork=true, the host's hostname is used. We use TPU_WORKER_ID or JOB_COMPLETION_INDEX instead.
+                if [ -n "$TPU_WORKER_ID" ]; then
+                  export NODE_RANK=$TPU_WORKER_ID
+                elif [ -n "$JOB_COMPLETION_INDEX" ]; then
+                  export NODE_RANK=$JOB_COMPLETION_INDEX
+                else
+                  export NODE_RANK=$(echo $HOSTNAME | grep -o '[0-9]\+$')
+                fi
+                echo "Detected Host: $HOSTNAME | Node Rank: $NODE_RANK"
                 
-                # Expose the current node's rank based on JobSet env variables
-                # PyTorch DDP uses rank and world size
-                export RANK=${JOB_COMPLETION_INDEX}
-                export WORLD_SIZE=4
+                # Construct TORCH_TPU_SLICEBUILDER_ADDRESSES from TPU_WORKER_HOSTNAMES (1 unique port per process rank)
+                if [ -n "$TPU_WORKER_HOSTNAMES" ]; then
+                  export TORCH_TPU_SLICEBUILDER_ADDRESSES=$(echo $TPU_WORKER_HOSTNAMES | tr ',' '\n' | while read host; do for i in {0..3}; do echo "$host:$((8070 + i))"; done; done | tr '\n' ',' | sed 's/,$//')
+                fi
+              
+                # Set TORCH_TPU_TOPOLOGY
+                export TORCH_TPU_TOPOLOGY="2,2,2,1"
                 
-                python3 mamba_tpu/train.py
-              resources:
-                limits:
-                  google.com/tpu: "4" # 4 TPU chips per VM
-            restartPolicy: Never
+                #echo "Slice Builder Addresses: $TORCH_TPU_SLICEBUILDER_ADDRESSES"
+                #echo "Topology: $TORCH_TPU_TOPOLOGY"
+                
+                # Execute the training loop using torchrun
+                
+                pip install triton
+                cd mamba_tpu
+                cp -r /gcs-fuse/train.py .
+                chmod +x train.py
+                #sleep infinity
+                eval $(python -m torch_tpu._internal.distributed.launchers.singlehost_wrapper | sed 's/^/export /')
+                python3 -m torch.distributed.run \
+                  --nproc_per_node=4 \
+                  --nnodes=2\
+                  --node_rank=$NODE_RANK \
+                  --master_addr=$MASTER_ADDR \
+                  --master_port=$MASTER_PORT \
+                  train.py

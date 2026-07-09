@@ -7,7 +7,7 @@ PROJECT_ID="cloud-tpu-multipod-dev"
 REGION="us-central1"
 ZONE="us-central1"
 CLUSTER_NAME="rick-tpu-ctk"
-NODEPOOL_NAME="ironwood-2x2x4-pool"
+NODEPOOL_NAME="ironwood-2x2x1-pool"
 
 # echo "Creating GKE cluster ${CLUSTER_NAME} in ${ZONE}..."
 # gcloud container clusters create ${CLUSTER_NAME} \
@@ -20,7 +20,7 @@ POLICY_NAME="${NODEPOOL_NAME}-policy"
 echo "Creating compute resource policy ${POLICY_NAME} in ${REGION}..."
 gcloud compute resource-policies create workload-policy ${POLICY_NAME} \
   --type=HIGH_THROUGHPUT \
-  --accelerator-topology=2x2x4 \
+  --accelerator-topology=2x2x2 \
   --project=${PROJECT_ID} \
   --region=${REGION} || echo "Policy might already exist, continuing..."
 
@@ -31,8 +31,8 @@ gcloud container node-pools create ${NODEPOOL_NAME} \
   --location=${ZONE} \
   --node-locations=us-central1-c \
   --machine-type=tpu7x-standard-4t \
-  --num-nodes=4 \
-  --tpu-topology=2x2x4 \
+  --num-nodes=2 \
+  --tpu-topology=2x2x2 \
   --spot \
   --placement-policy=${POLICY_NAME} \
   --enable-image-streaming \

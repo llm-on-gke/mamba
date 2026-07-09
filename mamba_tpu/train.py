@@ -6,16 +6,24 @@ from torch import optim
 
 # Ensure we can import from mamba_ssm
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from mamba_ssm.modules.mamba3 import Mamba3
+from mamba_ssm.modules.mamba2_simple import Mamba2Simple
 
 def worker_fn():
     # Attempt to initialize torch_tpu
     try:
-        from torch_tpu import api
+        #from torch_tpu import api
         from torch import distributed as dist
         from torch.nn.parallel import DistributedDataParallel as DDP
+        from torch_tpu import api
+        from torch_tpu._internal.utils import utils
+
+        TPU_DEVICE_TYPE: Final[str] = "tpu"
         
-        device = api.tpu_device()
+        device=api.tpu_device()
+        #device = torch.device("tpu")
+        _ = torch.zeros(1, device=device)
+        print(f"Executing on native TorchTPU device: {device}")
+        compile_backend = "tpu"
         dist.init_process_group(backend="tpu_dist")
         rank = dist.get_rank()
         world_size = dist.get_world_size()
@@ -35,7 +43,7 @@ def worker_fn():
     print(f"Rank {rank}/{world_size} initializing model on {device}...")
     
     # 1. Create Model
-    model = Mamba3(
+    model = Mamba2Simple(
         d_model=d_model,
         d_state=16,
         expand=2,
