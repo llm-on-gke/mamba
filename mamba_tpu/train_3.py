@@ -119,8 +119,9 @@ def mamba3_siso_combined_aten(
     # 4. Trapezoidal integration factors
     Trap = torch.sigmoid(Trap.to(torch.float32))  # (B, H, L)
     
-    DT_shifted = F.pad(DT[:, :, 1:], (0, 1), value=0.0)
-    Trap_shifted = F.pad(Trap[:, :, 1:], (0, 1), value=0.0)
+    batch, nheads, _ = DT.shape
+    DT_shifted = torch.cat([DT[:, :, 1:], torch.zeros(batch, nheads, 1, device=DT.device, dtype=DT.dtype)], dim=2)
+    Trap_shifted = torch.cat([Trap[:, :, 1:], torch.zeros(batch, nheads, 1, device=Trap.device, dtype=Trap.dtype)], dim=2)
     
     shifted_gamma = DT_shifted * (1.0 - Trap_shifted)
     gamma = DT * Trap
@@ -138,11 +139,12 @@ def mamba3_siso_combined_aten(
     # 7. SSD Chunk Scan
     pad_len = (chunk_size - (seqlen % chunk_size)) % chunk_size
     if pad_len > 0:
-        Q_rot = F.pad(Q_rot, (0, 0, 0, 0, 0, pad_len))
-        K_scaled = F.pad(K_scaled, (0, 0, 0, 0, 0, pad_len))
-        V = F.pad(V, (0, 0, 0, 0, 0, pad_len))
-        ADT = F.pad(ADT, (0, pad_len))
-        qk_dot = F.pad(qk_dot, (0, 0, 0, pad_len))
+        batch = Q_rot.shape[0]
+        Q_rot = torch.cat([Q_rot, torch.zeros(batch, pad_len, Q_rot.shape[2], Q_rot.shape[3], device=Q_rot.device, dtype=Q_rot.dtype)], dim=1)
+        K_scaled = torch.cat([K_scaled, torch.zeros(batch, pad_len, K_scaled.shape[2], K_scaled.shape[3], device=K_scaled.device, dtype=K_scaled.dtype)], dim=1)
+        V = torch.cat([V, torch.zeros(batch, pad_len, V.shape[2], V.shape[3], device=V.device, dtype=V.dtype)], dim=1)
+        ADT = torch.cat([ADT, torch.zeros(batch, ADT.shape[1], pad_len, device=ADT.device, dtype=ADT.dtype)], dim=2)
+        qk_dot = torch.cat([qk_dot, torch.zeros(batch, pad_len, qk_dot.shape[2], device=qk_dot.device, dtype=qk_dot.dtype)], dim=1)
         
     padded_seqlen = seqlen + pad_len
     num_chunks = padded_seqlen // chunk_size
@@ -154,9 +156,10 @@ def mamba3_siso_combined_aten(
     ADT_chunk = rearrange(ADT, "b h (k c) -> b k h c", c=chunk_size)
     dA_cumsum = torch.cumsum(ADT_chunk, dim=-1)  # (b, k, h, c)
     
-    decay_matrix = torch.exp(dA_cumsum.unsqueeze(-1) - dA_cumsum.unsqueeze(-2))
+    dt_segment_sum = dA_cumsum.unsqueeze(-1) - dA_cumsum.unsqueeze(-2)
     strict_causal_mask = torch.tril(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=V.device), diagonal=-1)
-    decay_matrix = torch.where(strict_causal_mask, decay_matrix, 0.0)
+    dt_segment_sum = torch.where(strict_causal_mask, dt_segment_sum, -float('inf'))
+    decay_matrix = torch.exp(dt_segment_sum)
     
     scores = torch.einsum("bkhcp,bkhsp->bkhcs", Q_chunk, K_chunk)
     decayed_scores = scores * decay_matrix

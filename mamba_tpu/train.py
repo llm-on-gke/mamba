@@ -33,10 +33,13 @@ def state_passing_ref(states, dA_chunk_cumsum, initial_states=None):
         initial_states = torch.zeros_like(states[:, 0])
     states = torch.cat([rearrange(initial_states, "b h d -> b 1 h d"), states], dim=1)
     dA_chunk_cumsum = torch.cat([torch.zeros_like(dA_chunk_cumsum[:, :, :1]), dA_chunk_cumsum], dim=-1)
-    dA_chunk_cumsum = torch.cumsum(dA_chunk_cumsum, dim=-1)
+    
+    mask = torch.tril(torch.ones(dA_chunk_cumsum.shape[-1], dA_chunk_cumsum.shape[-1], device=dA_chunk_cumsum.device, dtype=dA_chunk_cumsum.dtype))
+    dA_chunk_cumsum = torch.einsum('b h l, m l -> b h m', dA_chunk_cumsum, mask)
+        
     nchunks = dA_chunk_cumsum.shape[-1]
     dt_chunk_segment_sum = dA_chunk_cumsum[:, :, :, None] - dA_chunk_cumsum[:, :, None, :]
-    causal_mask = torch.tril(torch.ones(nchunks, nchunks, device=states.device, dtype=torch.bool), diagonal=0)
+    causal_mask = torch.tril(torch.ones(nchunks, nchunks, dtype=torch.bool)).to(states.device)
     dt_chunk_segment_sum = torch.where(causal_mask, dt_chunk_segment_sum, -float('inf'))
     decay_chunk = torch.exp(dt_chunk_segment_sum)
     out = torch.einsum("bhzc,bchd->bzhd", decay_chunk.to(dtype=states.dtype), states)
@@ -51,7 +54,7 @@ def chunk_scan_ref(B, C, x, dt, dA_cumsum, prev_states, D=None, z=None):
     CB = torch.einsum("bclhn,bcshn->bchls", rearrange(C, "b (c l) h n -> b c l h n", c=nchunks),
                       rearrange(B, "b (c s) h n -> b c s h n", c=nchunks))
     dt_segment_sum = dA_cumsum[:, :, :, :, None] - dA_cumsum[:, :, :, None, :]
-    causal_mask = torch.tril(torch.ones(chunk_size, chunk_size, device=x.device, dtype=torch.bool), diagonal=0)
+    causal_mask = torch.tril(torch.ones(chunk_size, chunk_size, dtype=torch.bool)).to(x.device)
     dt_segment_sum = torch.where(causal_mask, dt_segment_sum, -float('inf'))
     decay = torch.exp(dt_segment_sum)
     scores_decay = CB * rearrange(decay, "b h c l s -> b c h l s")
@@ -93,9 +96,11 @@ def ssd_chunk_scan_combined_ref(x, dt, A, B, C, chunk_size, D=None, z=None, dt_b
         dt = dt + rearrange(dt_bias, "h -> h 1 1")
     if dt_softplus:
         dt = F.softplus(dt)
+        
+    mask = torch.tril(torch.ones(chunk_size, chunk_size, device=dt.device, dtype=dt.dtype))
+    dt_chunk_cumsum = torch.einsum('bhcl,ml->bhcm', dt, mask)
     dA = dt * rearrange(A, "h -> h 1 1")
-    dA_cumsum = torch.cumsum(dA, dim=-1)
-    
+    dA_cumsum = torch.einsum('bhcl,ml->bhcm', dA, mask)
     states = chunk_state_ref(B, x, dt, dA_cumsum)
     states_dtype = states.dtype
     if states.dtype not in [torch.float32, torch.float64]:
@@ -124,7 +129,7 @@ class RMSNormGated(nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
 
 class Mamba2SimplePure(nn.Module):
-    def __init__(self, d_model, d_state=64, d_conv=4, expand=2, headdim=64, ngroups=1, chunk_size=256, device=None, dtype=None):
+    def __init__(self, d_model, d_state=64, d_conv=4, expand=2, headdim=64, ngroups=1, chunk_size=64, device=None, dtype=None):
         super().__init__()
         factory_kwargs = {"device": device, "dtype": dtype}
         self.d_model = d_model
@@ -178,9 +183,13 @@ class Mamba2SimplePure(nn.Module):
         
         dt = F.softplus(dt + self.dt_bias)
 
-        # 1D Convolution (causal by truncating padding)
-        xBC = self.act(self.conv1d(xBC.transpose(1, 2)).transpose(1, 2))
-        xBC = xBC[:, :seqlen, :]
+        # Use standard Conv1d to trigger FSDP AllGather hooks automatically
+        xBC_t = rearrange(xBC, "b l c -> b c l")
+        out_conv = self.conv1d(xBC_t)
+        # Causal convolution: drop the last (d_conv - 1) elements
+        d_conv = self.conv1d.kernel_size[0]
+        out_conv = out_conv[:, :, :xBC_t.shape[-1]]
+        xBC = self.act(rearrange(out_conv, "b c l -> b l c"))
 
         x, B, C = torch.split(xBC, [self.d_inner, self.ngroups * self.d_state, self.ngroups * self.d_state], dim=-1)
         
@@ -211,8 +220,8 @@ def worker_fn():
 
     print(f"[Rank {rank}/{world_size}] Worker started.")
 
-    d_model = 128
-    batch_size = 4
+    d_model = 2048
+    batch_size = 1
     seqlen = 64
 
     # Initialize pure PyTorch Mamba2 model on CPU
