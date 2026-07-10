@@ -94,7 +94,10 @@ def mamba3_siso_combined_aten(
     # 3. Rotary Position Embeddings (RoPE)
     DT_seq = DT.transpose(1, 2).unsqueeze(-1)  # (B, L, H, 1)
     angles_dt = Angles * DT_seq
-    angles_cumsum = torch.cumsum(angles_dt, dim=1)
+    # angles_cumsum = torch.cumsum(angles_dt, dim=1)
+    L_dim = angles_dt.shape[1]
+    mask_L = torch.tril(torch.ones(L_dim, L_dim, device=angles_dt.device, dtype=angles_dt.dtype))
+    angles_cumsum = torch.einsum('blhs,ml->bmhs', angles_dt, mask_L)
     
     def apply_rope(x, angles_cs):
         headdim_angles = angles_cs.shape[-1]
@@ -154,7 +157,10 @@ def mamba3_siso_combined_aten(
     V_chunk = rearrange(V, "b (k c) h p -> b k h c p", c=chunk_size)
     
     ADT_chunk = rearrange(ADT, "b h (k c) -> b k h c", c=chunk_size)
-    dA_cumsum = torch.cumsum(ADT_chunk, dim=-1)  # (b, k, h, c)
+    # dA_cumsum = torch.cumsum(ADT_chunk, dim=-1)  # (b, k, h, c)
+    C_dim = ADT_chunk.shape[-1]
+    mask_C = torch.tril(torch.ones(C_dim, C_dim, device=ADT_chunk.device, dtype=ADT_chunk.dtype))
+    dA_cumsum = torch.einsum('bkhc,mc->bkhm', ADT_chunk, mask_C)
     
     dt_segment_sum = dA_cumsum.unsqueeze(-1) - dA_cumsum.unsqueeze(-2)
     strict_causal_mask = torch.tril(torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=V.device), diagonal=-1)
