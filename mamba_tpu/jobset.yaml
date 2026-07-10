@@ -97,14 +97,11 @@ spec:
                 #sleep infinity
 
                 cd /workspace/mamba_tpu
-                rm -f train.py
-                cp /gcs-fuse/train.py .
-                cp /gcs-fuse/train_3.py .
-                #cd /workspace/examples/distributed/tensor_parallel/manual
+                
                 python3 -m torch.distributed.run \
                   --nproc_per_node=8 \
                   --nnodes=2 \
                   --node_rank=$NODE_RANK \
                   --master_addr=$MASTER_ADDR \
                   --master_port=$MASTER_PORT \
-                  ./train_3.py
+                  ./model_parallel_playground.py --model mamba2 --config fsdp
