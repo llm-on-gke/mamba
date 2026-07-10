@@ -6,3 +6,5 @@ build/
 **.so
 *.hip
 *_hip.*
+mamba_tpu/*.tar
+mamba_tpu/train,py

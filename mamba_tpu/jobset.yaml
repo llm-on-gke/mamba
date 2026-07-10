@@ -46,7 +46,7 @@ spec:
                   metadataTypeCacheCapacity: "-1Mi"
             containers:
             - name: torch-tpu-container
-              image: us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/gke-llm/mamba2-tpu:latest
+              image: us-east1-docker.pkg.dev/cloud-tpu-multipod-dev/gke-llm/mamba3-tpu:latest
               securityContext:
                 privileged: true
               ports:
@@ -71,41 +71,35 @@ spec:
               - bash
               - -c
               - |
-                # The JobSet controller names the pods matching: <jobset-name>-<replicated-job-name>-<replicated-job-index>-<pod-index>
-                # For our setup, the hostnames will be llama2-fsdp-training-slice-0-0 and llama2-fsdp-training-slice-0-1.
-                # However, with hostNetwork=true, the host's hostname is used. We use TPU_WORKER_ID or JOB_COMPLETION_INDEX instead.
-                if [ -n "$TPU_WORKER_ID" ]; then
-                  export NODE_RANK=$TPU_WORKER_ID
-                elif [ -n "$JOB_COMPLETION_INDEX" ]; then
-                  export NODE_RANK=$JOB_COMPLETION_INDEX
-                else
-                  export NODE_RANK=$(echo $HOSTNAME | grep -o '[0-9]\+$')
-                fi
-                echo "Detected Host: $HOSTNAME | Node Rank: $NODE_RANK"
-                
-                # Construct TORCH_TPU_SLICEBUILDER_ADDRESSES from TPU_WORKER_HOSTNAMES (1 unique port per process rank)
-                if [ -n "$TPU_WORKER_HOSTNAMES" ]; then
-                  export TORCH_TPU_SLICEBUILDER_ADDRESSES=$(echo $TPU_WORKER_HOSTNAMES | tr ',' '\n' | while read host; do for i in {0..3}; do echo "$host:$((8070 + i))"; done; done | tr '\n' ',' | sed 's/,$//')
-                fi
-              
+               
                 # Set TORCH_TPU_TOPOLOGY
-                export TORCH_TPU_TOPOLOGY="2,2,2,1"
+                export TORCH_TPU_TOPOLOGY="2,2,2,2"
                 
-                #echo "Slice Builder Addresses: $TORCH_TPU_SLICEBUILDER_ADDRESSES"
-                #echo "Topology: $TORCH_TPU_TOPOLOGY"
-                
-                # Execute the training loop using torchrun
-                
-                pip install triton
-                cd mamba_tpu
-                cp -r /gcs-fuse/train.py .
-                chmod +x train.py
+                export WORLD_SIZE=16
+
+                echo "Running multihost_wrapper to detect topology..."
+                eval $(python3 -m torch_tpu._internal.distributed.launchers.multihost_wrapper)
+                export TORCH_TPU_TOPOLOGY TORCH_TPU_SLICEBUILDER_ADDRESSES
+                export TORCH_TPU_XPROF_SESSION_ID
+                export NNODES NODE_RANK MASTER_ADDR MASTER_PORT
+
+                echo "Configuration detected:"
+                echo "  NNODES: $NNODES"
+                echo "  NODE_RANK: $NODE_RANK"
+                echo "  MASTER_ADDR: $MASTER_ADDR"
+                echo "  MASTER_PORT: $MASTER_PORT"
+                echo "  TOPOLOGY: $TORCH_TPU_TOPOLOGY"
                 #sleep infinity
-                eval $(python -m torch_tpu._internal.distributed.launchers.singlehost_wrapper | sed 's/^/export /')
+
+                cd /workspace/mamba_tpu
+                rm -f train.py
+                cp /gcs-fuse/train.py .
+                cp /gcs-fuse/train_3.py .
+                #cd /workspace/examples/distributed/tensor_parallel/manual
                 python3 -m torch.distributed.run \
-                  --nproc_per_node=4 \
-                  --nnodes=2\
+                  --nproc_per_node=8 \
+                  --nnodes=2 \
                   --node_rank=$NODE_RANK \
                   --master_addr=$MASTER_ADDR \
                   --master_port=$MASTER_PORT \
-                  train.py
+                  ./train_3.py
