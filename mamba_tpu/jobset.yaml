@@ -60,7 +60,7 @@ spec:
                   google.com/tpu: 4  # 4 chips per node
               env:
               - name: PYTHONPATH
-                value: "/workspace/mamba_tpu"
+                value: "/workspace:/workspace/mamba_tpu"
               - name: MASTER_ADDR
                 value: "mamba3-fsdp-training-slice-0-0.mamba3-fsdp-training"
               - name: MASTER_PORT
@@ -97,7 +97,9 @@ spec:
                 #sleep infinity
 
                 cd /workspace/mamba_tpu
-                
+                #rm -f train_3.py
+                #cp /gcs-fuse/train_3.py .
+
                 python3 -m torch.distributed.run \
                   --nproc_per_node=8 \
                   --nnodes=2 \
