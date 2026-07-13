@@ -546,8 +546,8 @@ class Transformer(nn.Module):
         """
         return cls(model_args).to(model_args.dtype)
 
-from train import Mamba2SimplePure
-from train_3 import Mamba3SimpleTPU
+from mamba2 import Mamba2SimplePure
+from mamba3 import Mamba3SimpleTPU
 
 @dataclass
 class MambaModelArgs:
