@@ -79,9 +79,7 @@ spec:
                
                 # Set TORCH_TPU_TOPOLOGY
                 export TORCH_TPU_TOPOLOGY="2,2,2,2"
-                
                 export WORLD_SIZE=16
-
                 echo "Running multihost_wrapper to detect topology..."
                 eval $(python3 -m torch_tpu._internal.distributed.launchers.multihost_wrapper)
                 export TORCH_TPU_TOPOLOGY TORCH_TPU_SLICEBUILDER_ADDRESSES
@@ -94,15 +92,12 @@ spec:
                 echo "  MASTER_ADDR: $MASTER_ADDR"
                 echo "  MASTER_PORT: $MASTER_PORT"
                 echo "  TOPOLOGY: $TORCH_TPU_TOPOLOGY"
-                #sleep infinity
-
+  
                 cd /workspace/mamba_tpu
-                #rm -f train_3.py
-                #cp /gcs-fuse/train_3.py .
-
+               
                 python3 -m torch.distributed.run \
                   --nproc_per_node=8 \
-                  --nnodes=2 \
+                  --nnodes=$NNODES \
                   --node_rank=$NODE_RANK \
                   --master_addr=$MASTER_ADDR \
                   --master_port=$MASTER_PORT \
